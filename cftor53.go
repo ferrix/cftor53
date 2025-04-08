@@ -6,6 +6,7 @@ import (
 	"github.com/aws/aws-cdk-go/awscdk/v2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awscertificatemanager"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsroute53"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awsssm"
 	"github.com/aws/constructs-go/constructs/v10"
 	"github.com/aws/jsii-runtime-go"
 )
@@ -21,7 +22,7 @@ type Cftor53StackProps struct {
 }
 
 // Main stack for Route53 hosted zone
-func NewCftor53Stack(scope constructs.Construct, id string, props *Cftor53StackProps) awscdk.Stack {
+func NewCftor53Stack(scope constructs.Construct, id string, props *Cftor53StackProps) (awscdk.Stack, *string) {
 	var sprops awscdk.StackProps
 	if props != nil {
 		sprops = props.StackProps
@@ -45,7 +46,7 @@ func NewCftor53Stack(scope constructs.Construct, id string, props *Cftor53StackP
 	// Output the Route53 name servers to be used in Cloudflare DNS setup
 	nameServers := hostedZone.HostedZoneNameServers()
 
-	// Using Fn.join instead of Go's strings.Join to properly handle CDK tokens
+	// Using Fn.join to properly handle CDK tokens
 	nameServersString := awscdk.Fn_Join(jsii.String(", "), nameServers)
 
 	awscdk.NewCfnOutput(stack, jsii.String("NameServers"), &awscdk.CfnOutputProps{
@@ -53,15 +54,22 @@ func NewCftor53Stack(scope constructs.Construct, id string, props *Cftor53StackP
 		Description: jsii.String("Name servers for the Route53 hosted zone. Add these as NS records in Cloudflare for delegation."),
 	})
 
-	// Output the hosted zone ID for cross-stack reference
-	exportName := "HostedZoneId-" + *props.Subdomain + "-" + strings.ReplaceAll(*props.ParentDomain, ".", "-")
-	awscdk.NewCfnOutput(stack, jsii.String("HostedZoneId"), &awscdk.CfnOutputProps{
-		Value:       hostedZone.HostedZoneId(),
-		Description: jsii.String("The Hosted Zone ID for the subdomain"),
-		ExportName:  jsii.String(exportName),
+	// Store the hosted zone ID in SSM Parameter Store for reference
+	paramName := "/cftor53/" + *props.Subdomain + "/" + strings.ReplaceAll(*props.ParentDomain, ".", "-") + "/hostedZoneId"
+	ssmParam := awsssm.NewStringParameter(stack, jsii.String("HostedZoneIdSSMParam"), &awsssm.StringParameterProps{
+		ParameterName: jsii.String(paramName),
+		StringValue:   hostedZone.HostedZoneId(),
+		Description:   jsii.String("Hosted Zone ID for " + *props.Subdomain + "." + *props.ParentDomain),
 	})
 
-	return stack
+	// Output the SSM parameter name
+	awscdk.NewCfnOutput(stack, jsii.String("HostedZoneIdParamOutput"), &awscdk.CfnOutputProps{
+		Value:       ssmParam.ParameterName(),
+		Description: jsii.String("SSM Parameter containing the Hosted Zone ID"),
+	})
+
+	// Return the stack and the hosted zone ID
+	return stack, hostedZone.HostedZoneId()
 }
 
 // Separate stack for ACM certificate in us-east-1 (required for CloudFront)
@@ -74,7 +82,7 @@ type CertificateStackProps struct {
 	// Subdomain to be hosted on Route53
 	Subdomain *string
 
-	// Hosted Zone ID for DNS validation
+	// Hosted Zone ID (direct reference, not from SSM)
 	HostedZoneId *string
 }
 
@@ -100,7 +108,7 @@ func NewCertificateStack(scope constructs.Construct, id string, props *Certifica
 	// Full domain name for the subdomain (e.g., sub.example.com)
 	fullDomainName := jsii.String(*props.Subdomain + "." + *props.ParentDomain)
 
-	// Import the hosted zone from the main stack
+	// Import the hosted zone from the main stack using the direct ID
 	hostedZone := awsroute53.HostedZone_FromHostedZoneId(stack, jsii.String("ImportedHostedZone"), props.HostedZoneId)
 
 	// Create an SSL certificate for the subdomain
@@ -109,12 +117,24 @@ func NewCertificateStack(scope constructs.Construct, id string, props *Certifica
 		Validation: awscertificatemanager.CertificateValidation_FromDns(hostedZone),
 	})
 
+	// Store the certificate ARN in SSM Parameter Store
+	certificateParamName := "/cftor53/" + *props.Subdomain + "/" + strings.ReplaceAll(*props.ParentDomain, ".", "-") + "/certificateArn"
+	certParam := awsssm.NewStringParameter(stack, jsii.String("CertificateArnSSMParam"), &awsssm.StringParameterProps{
+		ParameterName: jsii.String(certificateParamName),
+		StringValue:   certificate.CertificateArn(),
+		Description:   jsii.String("Certificate ARN for " + *props.Subdomain + "." + *props.ParentDomain),
+	})
+
 	// Output the certificate ARN
-	certificateExportName := "CertificateArn-" + *props.Subdomain + "-" + strings.ReplaceAll(*props.ParentDomain, ".", "-")
-	awscdk.NewCfnOutput(stack, jsii.String("CertificateArn"), &awscdk.CfnOutputProps{
+	awscdk.NewCfnOutput(stack, jsii.String("CertificateArnOutput"), &awscdk.CfnOutputProps{
 		Value:       certificate.CertificateArn(),
 		Description: jsii.String("Certificate ARN to use with services like CloudFront or ALB"),
-		ExportName:  jsii.String(certificateExportName),
+	})
+
+	// Output the SSM parameter name
+	awscdk.NewCfnOutput(stack, jsii.String("CertificateArnParamOutput"), &awscdk.CfnOutputProps{
+		Value:       certParam.ParameterName(),
+		Description: jsii.String("SSM Parameter containing the Certificate ARN"),
 	})
 
 	return stack
@@ -123,31 +143,39 @@ func NewCertificateStack(scope constructs.Construct, id string, props *Certifica
 func main() {
 	defer jsii.Close()
 
-	app := awscdk.NewApp(nil)
+	// Create an app with cross-region references enabled through context
+	app := awscdk.NewApp(&awscdk.AppProps{
+		Context: &map[string]interface{}{
+			"@aws-cdk/core:enableCrossAccountRegion": true,
+		},
+	})
 
 	// Domain configuration
 	parentDomain := jsii.String("fuk.fi") // Replace with your Cloudflare-hosted domain
 	subdomain := jsii.String("yakv")      // Replace with your desired subdomain
 
-	// Create the main stack with Route53 hosted zone
-	NewCftor53Stack(app, "Cftor53Stack", &Cftor53StackProps{
+	// Create the main stack with Route53 hosted zone and get the hosted zone ID
+	_, hostedZoneId := NewCftor53Stack(app, "Cftor53Stack", &Cftor53StackProps{
 		StackProps: awscdk.StackProps{
-			Env: env(),
+			Env:                   env(),
+			CrossRegionReferences: jsii.Bool(true),
 		},
 		ParentDomain: parentDomain,
 		Subdomain:    subdomain,
 	})
 
-	// Create the certificate stack in us-east-1
-	// We can't directly reference the hosted zone output here, so we need to use cross-stack references
-	importName := "HostedZoneId-" + *subdomain + "-" + strings.ReplaceAll(*parentDomain, ".", "-")
+	// Create the certificate stack in us-east-1 with direct reference to the hosted zone ID
 	NewCertificateStack(app, "Cftor53CertificateStack", &CertificateStackProps{
 		StackProps: awscdk.StackProps{
-			Env: env(),
+			Env: &awscdk.Environment{
+				Account: env().Account,
+				Region:  jsii.String("us-east-1"), // Certificate must be in us-east-1 for CloudFront
+			},
+			CrossRegionReferences: jsii.Bool(true),
 		},
 		ParentDomain: parentDomain,
 		Subdomain:    subdomain,
-		HostedZoneId: awscdk.Fn_ImportValue(jsii.String(importName)),
+		HostedZoneId: hostedZoneId,
 	})
 
 	app.Synth(nil)

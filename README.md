@@ -9,6 +9,12 @@ The stack creates:
 2. A DNS-validated ACM certificate for the subdomain (in us-east-1 for CloudFront compatibility)
 3. CloudFormation outputs with the name servers to add to Cloudflare
 
+## Features
+
+- Cross-region resources: Hosted zone in your preferred region and certificate in us-east-1
+- Cross-region references properly handled using CDK's cross-region capabilities
+- SSM Parameters for referencing resources in your own infrastructure
+
 ## Prerequisites
 
 - AWS account and configured AWS CLI
@@ -21,27 +27,40 @@ The stack creates:
 1. Clone this repository
 2. Update the `main()` function in `cftor53.go` with your domain details:
    ```go
-   NewCftor53Stack(app, "Cftor53Stack", &Cftor53StackProps{
-       StackProps: awscdk.StackProps{
-           Env: env(),
-       },
-       ParentDomain: jsii.String("example.com"), // Replace with your Cloudflare-hosted domain
-       Subdomain:    jsii.String("sub"),         // Replace with your desired subdomain
-   })
+   parentDomain := jsii.String("example.com") // Replace with your Cloudflare-hosted domain
+   subdomain := jsii.String("sub")            // Replace with your desired subdomain
    ```
 
-3. Deploy the stack:
+3. Update the account ID and region in the `env()` function:
+   ```go
+   return &awscdk.Environment{
+       Account: jsii.String("123456789012"), // Replace with your AWS account ID
+       Region:  jsii.String("eu-north-1"),   // Replace with your preferred region
+   }
+   ```
+
+4. Deploy the stack:
    ```bash
-   cdk deploy
+   cdk deploy --all
    ```
 
-4. After deployment, note the name servers in the CloudFormation outputs.
+5. After deployment, note the name servers in the CloudFormation outputs.
 
-5. In Cloudflare DNS settings for your domain, add NS records for your subdomain pointing to the Route53 name servers:
+6. In Cloudflare DNS settings for your domain, add NS records for your subdomain pointing to the Route53 name servers:
    - Type: NS
    - Name: your-subdomain
    - Content: the name servers from the CloudFormation outputs (add each as a separate record)
    - TTL: Auto
+
+## How It Works
+
+The solution uses two separate stacks:
+
+1. **Main Stack (Cftor53Stack)**: Creates the Route53 hosted zone for your subdomain in your preferred region.
+
+2. **Certificate Stack (Cftor53CertificateStack)**: Creates an ACM certificate in the us-east-1 region (required for CloudFront compatibility).
+
+The stacks use cross-region references to properly link resources between different regions.
 
 ## Using the Certificate
 
