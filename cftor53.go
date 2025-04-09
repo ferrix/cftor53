@@ -46,6 +46,13 @@ type ConfigFile struct {
 	SecretName     string                `json:"secret_name,omitempty"`
 	SsmParamPrefix string                `json:"ssm_param_prefix,omitempty"`
 	LambdaSettings *LambdaSettingsConfig `json:"lambda_settings,omitempty"`
+	Regions        *RegionConfig         `json:"regions,omitempty"`
+}
+
+// RegionConfig represents the region configuration
+type RegionConfig struct {
+	Main        string `json:"main"`
+	Certificate string `json:"certificate"`
 }
 
 // LambdaSettingsConfig represents the configuration for Lambda functions
@@ -86,6 +93,23 @@ func NewCftor53Stack(scope constructs.Construct, id string, props *Cftor53StackP
 	// Full domain name for the subdomain (e.g., sub.example.com)
 	fullDomainName := jsii.String(*props.Subdomain + "." + *props.ParentDomain)
 
+	// Create a secret for the Cloudflare API token if not provided from another stack
+	var cloudflareSecret awssecretsmanager.ISecret
+	if props.CloudflareApiTokenSecret != nil {
+		cloudflareSecret = props.CloudflareApiTokenSecret
+	} else if props.Config.ApiToken != "" {
+		// Create a local secret using the API token from config
+		cloudflareSecret = awssecretsmanager.NewSecret(stack, jsii.String("LocalCloudflareApiToken"), &awssecretsmanager.SecretProps{
+			Description: jsii.String("Cloudflare API Token for DNS management"),
+			SecretName:  jsii.String("cftor53/cloudflare/api-token-local"),
+			SecretObjectValue: &map[string]awscdk.SecretValue{
+				"api_token": awscdk.SecretValue_UnsafePlainText(jsii.String(props.Config.ApiToken)),
+			},
+		})
+	} else {
+		panic("Either CloudflareApiTokenSecret or Config.ApiToken must be provided")
+	}
+
 	// Create a custom resource to check for colliding DNS records in Cloudflare
 	// but not make any changes yet
 	checkRecordsLambda := awslambda.NewFunction(stack, jsii.String("CloudflareCheckDNSLambda"), &awslambda.FunctionProps{
@@ -99,7 +123,7 @@ func NewCftor53Stack(scope constructs.Construct, id string, props *Cftor53StackP
 
 	// Grant permissions to read the Cloudflare API token secret
 	// Create an explicit policy statement to grant read access to the secret
-	secretArn := props.CloudflareApiTokenSecret.SecretArn()
+	secretArn := cloudflareSecret.SecretArn()
 	checkRecordsLambda.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
 		Actions:   jsii.Strings("secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"),
 		Resources: jsii.Strings(*secretArn),
@@ -202,10 +226,12 @@ func NewCertificateStack(scope constructs.Construct, id string, props *Certifica
 	// Full domain name for the subdomain (e.g., sub.example.com)
 	fullDomainName := jsii.String(*props.Subdomain + "." + *props.ParentDomain)
 
-	// Create an ACM certificate in us-east-1 for CloudFront
+	// Import the Route53 hosted zone using the hosted zone ID
+	importedZone := awsroute53.HostedZone_FromHostedZoneId(stack, jsii.String("ImportedZone"), props.HostedZoneId)
+
 	certificate := awscertificatemanager.NewCertificate(stack, jsii.String("Certificate"), &awscertificatemanager.CertificateProps{
 		DomainName: fullDomainName,
-		Validation: awscertificatemanager.CertificateValidation_FromDns(awsroute53.HostedZone_FromHostedZoneId(stack, jsii.String("ImportedZone"), props.HostedZoneId)),
+		Validation: awscertificatemanager.CertificateValidation_FromDns(importedZone),
 	})
 
 	// Store the certificate ARN in SSM Parameter Store for reference by other stacks
@@ -252,6 +278,18 @@ func main() {
 		panic("Failed to parse config.json: " + err.Error())
 	}
 
+	// Set default regions if not provided
+	mainRegion := "eu-north-1" // Default main region
+	certRegion := "us-east-1"  // Default cert region (needed for CloudFront)
+	if config.Regions != nil {
+		if config.Regions.Main != "" {
+			mainRegion = config.Regions.Main
+		}
+		if config.Regions.Certificate != "" {
+			certRegion = config.Regions.Certificate
+		}
+	}
+
 	// Domain configuration from config.json
 	parentDomain := jsii.String(config.ParentDomain)
 	subdomain := jsii.String(config.Subdomain)
@@ -280,16 +318,16 @@ func main() {
 		}
 	}
 
-	// Create a secret in Secrets Manager for the Cloudflare API token
-	mainStack := awscdk.NewStack(app, jsii.String("CfCloudflareSecretsStack"), &awscdk.StackProps{
+	// Create a secret in Secrets Manager for the Cloudflare API token (in the main region)
+	secretsStack := awscdk.NewStack(app, jsii.String("CfCloudflareSecretsStack"), &awscdk.StackProps{
 		Env: &awscdk.Environment{
-			Region: jsii.String("us-east-1"), // Set a default region
+			Region: jsii.String(mainRegion),
 		},
 		CrossRegionReferences: jsii.Bool(true),
 	})
 
 	// Create a secret for the Cloudflare API token
-	cloudflareSecret := awssecretsmanager.NewSecret(mainStack, jsii.String("CloudflareApiToken"), &awssecretsmanager.SecretProps{
+	cloudflareSecret := awssecretsmanager.NewSecret(secretsStack, jsii.String("CloudflareApiToken"), &awssecretsmanager.SecretProps{
 		Description: jsii.String("Cloudflare API Token for DNS management"),
 		SecretName:  jsii.String(secretName),
 		SecretObjectValue: &map[string]awscdk.SecretValue{
@@ -302,7 +340,7 @@ func main() {
 		StackProps: awscdk.StackProps{
 			CrossRegionReferences: jsii.Bool(true),
 			Env: &awscdk.Environment{
-				Region: jsii.String("us-east-1"), // All stacks should have the same region for cross-stack references
+				Region: jsii.String(mainRegion),
 			},
 		},
 		ParentDomain:             parentDomain,
@@ -314,6 +352,8 @@ func main() {
 				TimeoutSeconds: int(lambdaTimeout),
 				MemorySizeMB:   int(lambdaMemory),
 			},
+			// Include the API token directly for cross-region deployments
+			ApiToken: config.ApiToken,
 		},
 	})
 
@@ -321,7 +361,7 @@ func main() {
 	NewCertificateStack(app, "Cftor53CertificateStack", &CertificateStackProps{
 		StackProps: awscdk.StackProps{
 			Env: &awscdk.Environment{
-				Region: jsii.String("us-east-1"), // Certificate must be in us-east-1 for CloudFront
+				Region: jsii.String(certRegion),
 			},
 			CrossRegionReferences: jsii.Bool(true),
 		},
@@ -330,6 +370,8 @@ func main() {
 		HostedZoneId: hostedZoneId,
 		Config: &ConfigFile{
 			SsmParamPrefix: ssmParamPrefix,
+			// Include the API token directly for cross-region deployments
+			ApiToken: config.ApiToken,
 		},
 	})
 
