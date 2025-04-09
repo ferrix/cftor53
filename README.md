@@ -1,125 +1,121 @@
-# CloudFlare to Route53 Subdomain Delegation
+# cftor53
 
-This CDK project sets up a Route53 hosted zone for a subdomain of a domain hosted on Cloudflare, allowing you to serve the subdomain from AWS while keeping the parent domain on Cloudflare.
+A CDK-powered tool for delegating Cloudflare subdomains to AWS Route53 with automatic ACM certificate provisioning.
 
-## Architecture
+## Overview
 
-The stack creates:
-1. A Route53 public hosted zone for your subdomain
-2. A DNS-validated ACM certificate for the subdomain (in us-east-1 for CloudFront compatibility)
-3. CloudFormation outputs with the name servers to add to Cloudflare
-4. A custom resource that automatically manages NS records in Cloudflare
+cftor53 automates the process of setting up a subdomain delegation from a Cloudflare-managed domain to AWS Route53, with ACM certificate validation handled automatically. The Lambda function checks for conflicting DNS records and manages the NS record updates in Cloudflare.
 
 ## Features
 
-- Cross-region resources: Hosted zone in your preferred region and certificate in us-east-1
-- Cross-region references properly handled using CDK's cross-region capabilities
-- SSM Parameters for referencing resources in your own infrastructure
-- Secure storage of Cloudflare API token in AWS Secrets Manager
-- Automatic checking for colliding DNS records in Cloudflare
-- Automatic updating of NS records in Cloudflare
-- Go-based Lambda function for efficient and reliable Cloudflare DNS management
+- Create a Route53 hosted zone for your subdomain
+- Delegate subdomain DNS management from Cloudflare to Route53
+- Automatically provision ACM certificates in us-east-1 (for CloudFront)
+- Cross-region support (main resources and certificates can be in different regions)
+- Handle DNS validation automatically
 
 ## Prerequisites
 
-- AWS account and configured AWS CLI
-- AWS CDK installed (`npm install -g aws-cdk`)
-- Go 1.18 or later
-- Domain registered and managed in Cloudflare
-- Cloudflare API token with Zone:Edit and DNS:Edit permissions
+- Go 1.18+
+- AWS CDK v2
+- An AWS account with appropriate permissions
+- A domain managed in Cloudflare
+- Cloudflare API token with Zone:Read and DNS:Edit permissions
 
-## Deployment Steps
+## Configuration
 
-1. Clone this repository
+Configuration is managed through a `config.json` file in the project root. Here's a sample configuration:
 
-2. Build the Go Lambda function:
-   ```bash
-   cd lambda
-   chmod +x build.sh
-   ./build.sh
-   cd ..
-   ```
+```json
+{
+  "api_token": "your-cloudflare-api-token",
+  "parent_domain": "example.com",
+  "subdomain": "api",
+  "regions": {
+    "main": "eu-north-1",
+    "certificate": "us-east-1"
+  },
+  "secret_name": "cftor53/cloudflare/api-token",
+  "ssm_param_prefix": "/cftor53",
+  "lambda_settings": {
+    "timeout_seconds": 120,
+    "memory_size_mb": 256
+  }
+}
+```
 
-3. Update the `main()` function in `cftor53.go` with your domain details:
-   ```go
-   parentDomain := jsii.String("example.com") // Replace with your Cloudflare-hosted domain
-   subdomain := jsii.String("sub")            // Replace with your desired subdomain
-   ```
+### Configuration Fields
 
-4. Update the account ID and region in the `env()` function:
-   ```go
-   return &awscdk.Environment{
-       Account: jsii.String("123456789012"), // Replace with your AWS account ID
-       Region:  jsii.String("eu-north-1"),   // Replace with your preferred region
-   }
-   ```
+| Field | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `api_token` | Cloudflare API token | Yes | N/A |
+| `parent_domain` | Your domain managed in Cloudflare | Yes | N/A |
+| `subdomain` | The subdomain to delegate to Route53 | Yes | N/A |
+| `regions.main` | AWS region for main resources | No | eu-north-1 |
+| `regions.certificate` | AWS region for certificates | No | us-east-1 |
+| `secret_name` | AWS Secrets Manager name for the token | No | cftor53/cloudflare/api-token |
+| `ssm_param_prefix` | Prefix for SSM parameters | No | /cftor53 |
+| `lambda_settings.timeout_seconds` | Lambda timeout | No | 120 |
+| `lambda_settings.memory_size_mb` | Lambda memory | No | 256 |
 
-5. Create a `config.json` file with your Cloudflare API token:
-   ```json
-   {
-     "api_token": "your-cloudflare-api-token"
-   }
-   ```
+## Deployment
 
-6. Deploy the stack:
-   ```bash
-   cdk deploy --all
-   ```
+### Building the Lambda function
 
-7. The stack will automatically handle the Cloudflare DNS setup:
-   - It will check for any conflicting DNS records
-   - It will automatically create the necessary NS records in Cloudflare
+```bash
+cd lambda
+./build.sh
+```
+
+### Deploying with CDK
+
+```bash
+# Make sure CDK is bootstrapped in your account
+npx cdk bootstrap
+
+# Deploy all stacks
+npx cdk deploy --all
+```
 
 ## How It Works
 
-The solution uses three separate stacks:
+1. Secrets Stack (`CfCloudflareSecretsStack`): Stores your Cloudflare API token securely in AWS Secrets Manager.
 
-1. **Secret Stack (CfCloudflareSecretsStack)**: Creates an AWS Secrets Manager secret to securely store your Cloudflare API token.
+2. Main Stack (`Cftor53Stack`): 
+   - Creates a Lambda function to interact with Cloudflare API
+   - Checks for conflicting DNS records in Cloudflare
+   - Creates a Route53 hosted zone for your subdomain
+   - Updates Cloudflare NS records to point to Route53 name servers
 
-2. **Main Stack (Cftor53Stack)**: Creates the Route53 hosted zone for your subdomain in your preferred region and implements a custom resource that:
-   - Checks for any colliding DNS records in Cloudflare
-   - Automatically creates NS records in Cloudflare pointing to the Route53 nameservers
-   - Updates the NS records if they change
+3. Certificate Stack (`Cftor53CertificateStack`):
+   - Creates an ACM certificate in us-east-1 region (required for CloudFront)
+   - Uses DNS validation with the Route53 hosted zone
+   - Stores the certificate ARN in SSM Parameter Store for reference
 
-3. **Certificate Stack (Cftor53CertificateStack)**: Creates an ACM certificate in the us-east-1 region (required for CloudFront compatibility).
+## Error Handling
 
-The stacks use cross-region references to properly link resources between different regions.
+The Lambda function has two phases:
 
-## Cloudflare Integration Details
+1. **DNS Check Phase**: Fails if any conflicting (non-NS) records exist for the subdomain in Cloudflare.
 
-The stack automatically handles Cloudflare DNS setup by:
-
-1. **Security**: Storing the Cloudflare API token in AWS Secrets Manager
-2. **Safety**: Checking for colliding DNS records before creating the NS records
-3. **Automation**: Creating and updating NS records in Cloudflare to point to Route53
-4. **Efficiency**: Using a Go-based Lambda function for reliable and fast operations
-
-The Go Lambda function:
-- Validates there are no conflicting DNS records in Cloudflare
-- Compares existing NS records with the desired Route53 nameservers
-- Adds missing NS records and removes incorrect ones
-- Fails deployment if there are conflicting records, ensuring safety
-
-If there are non-NS records for the subdomain in Cloudflare, the deployment will fail with an error message indicating which records are causing conflicts.
-
-## Using the Certificate
-
-The stack outputs the ARN of the generated certificate, which you can use with:
-- CloudFront distributions
-- API Gateway custom domains
-- Application Load Balancers
-- Other AWS services that support custom domains
+2. **NS Update Phase**: Updates NS records to point to Route53 name servers. 
+   - A partial failure during NS record additions/deletions is logged but does not abort the deployment
+   - The deployment succeeds as long as at least one NS record is successfully added
 
 ## Troubleshooting
 
-- **DNS Propagation**: DNS changes can take 24-48 hours to fully propagate worldwide.
-- **Certificate Validation**: The certificate validation will automatically complete once the DNS records are properly set up.
-- **Multiple Subdomains**: For multiple subdomains, deploy separate stacks with different subdomain parameters.
-- **Cloudflare API Token**: Ensure your Cloudflare API token has Zone:Edit and DNS:Edit permissions.
-- **Lambda Build Issues**: If you encounter issues building the Lambda function, ensure you have Go 1.18+ installed and try running the build script with verbose output: `GOOS=linux GOARCH=amd64 go build -v -o build/main main.go`
+### Invalid Access Token
 
-## Security
+If you see `Invalid access token` errors, check that:
+- Your Cloudflare API token is correct and has the required permissions
+- The token is properly stored in Secrets Manager
 
-- This setup enables secure HTTPS for your subdomain using AWS ACM.
-- Ensure your AWS IAM permissions follow the principle of least privilege.
-- The Cloudflare API token is stored securely in AWS Secrets Manager.
+### Cross-Region Deployment Issues
+
+For cross-region deployment errors, ensure:
+- CDK is bootstrapped in all regions you're using
+- Cross-region references are enabled in your CDK app
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
