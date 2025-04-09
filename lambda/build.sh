@@ -7,24 +7,29 @@ mkdir -p build
 # Get dependencies
 go mod tidy
 
-# Build the Lambda function for Amazon Linux 2
+# Build the Go binary for AWS Lambda (Amazon Linux 2 x86_64)
+echo "Building Lambda function..."
 GOOS=linux GOARCH=amd64 go build -o build/main main.go
 
 # Move to the build directory
 cd build
 
-# Copy the bootstrap file
-cp ../bootstrap .
+# Create the bootstrap file
+cat > bootstrap << 'EOF'
+#!/bin/sh
+./main
+EOF
 
-# Make sure bootstrap is executable (set execute permission explicitly)
-chmod 755 bootstrap
+# Make the bootstrap file executable
+chmod +x bootstrap
 
-# Zip the binary and bootstrap for Lambda deployment
+# Create the Lambda deployment package
+echo "Creating Lambda deployment package (main.zip)..."
 zip main.zip main bootstrap
 
-# Print file permissions as a sanity check
+# Verify file permissions in the zip
 echo "File permissions in zip:"
-unzip -v main.zip
+unzip -l main.zip
 
 # Move the zip file to the parent directory
 mv main.zip ..
@@ -33,4 +38,10 @@ mv main.zip ..
 cd ..
 rm -rf build
 
-echo "Lambda function built successfully" 
+# Display success message
+echo "Lambda function built successfully"
+
+# Instructions for testing
+echo ""
+echo "To run tests: cd .. && go test -v"
+echo "To run static analysis: cd .. && go install honnef.co/go/tools/cmd/staticcheck@latest && staticcheck ./..." 
