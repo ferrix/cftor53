@@ -244,9 +244,7 @@ func main() {
 	}
 
 	// Create a secret in Secrets Manager for the Cloudflare API token
-	mainStack := awscdk.NewStack(app, jsii.String("CfCloudflareSecretsStack"), &awscdk.StackProps{
-		Env: env(),
-	})
+	mainStack := awscdk.NewStack(app, jsii.String("CfCloudflareSecretsStack"), nil)
 
 	// Create a secret for the Cloudflare API token
 	cloudflareSecret := awssecretsmanager.NewSecret(mainStack, jsii.String("CloudflareApiToken"), &awssecretsmanager.SecretProps{
@@ -260,7 +258,6 @@ func main() {
 	// Create the main stack with Route53 hosted zone and get the hosted zone ID
 	_, hostedZoneId := NewCftor53Stack(app, "Cftor53Stack", &Cftor53StackProps{
 		StackProps: awscdk.StackProps{
-			Env:                   env(),
 			CrossRegionReferences: jsii.Bool(true),
 		},
 		ParentDomain:             parentDomain,
@@ -272,8 +269,7 @@ func main() {
 	NewCertificateStack(app, "Cftor53CertificateStack", &CertificateStackProps{
 		StackProps: awscdk.StackProps{
 			Env: &awscdk.Environment{
-				Account: env().Account,
-				Region:  jsii.String("us-east-1"), // Certificate must be in us-east-1 for CloudFront
+				Region: jsii.String("us-east-1"), // Certificate must be in us-east-1 for CloudFront
 			},
 			CrossRegionReferences: jsii.Bool(true),
 		},
@@ -283,23 +279,4 @@ func main() {
 	})
 
 	app.Synth(nil)
-}
-
-// env determines the AWS environment (account+region) in which our stack is to
-// be deployed. For more information see: https://docs.aws.amazon.com/cdk/latest/guide/environments.html
-func env() *awscdk.Environment {
-	// If you want your stack to be environment-agnostic, use this option
-	// return nil
-
-	// Uncomment below to use specific account/region
-	return &awscdk.Environment{
-		Account: jsii.String("867344475763"), // Replace with your AWS account ID
-		Region:  jsii.String("eu-north-1"),   // Replace with your preferred region
-	}
-
-	// Uncomment below to use the account/region from CDK_DEFAULT_* environment variables
-	// return &awscdk.Environment{
-	// 	Account: jsii.String(os.Getenv("CDK_DEFAULT_ACCOUNT")),
-	// 	Region:  jsii.String(os.Getenv("CDK_DEFAULT_REGION")),
-	// }
 }
