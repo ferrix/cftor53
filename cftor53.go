@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 
 	"github.com/aws/aws-cdk-go/awscdk/v2"
@@ -39,7 +40,9 @@ type CloudflareDNSCheckerProps struct {
 
 // ConfigFile represents the structure of the config.json file
 type ConfigFile struct {
-	ApiToken string `json:"api_token"`
+	ApiToken     string `json:"api_token"`
+	ParentDomain string `json:"parent_domain"`
+	Subdomain    string `json:"subdomain"`
 }
 
 type Cftor53StackProps struct {
@@ -232,16 +235,21 @@ func main() {
 		},
 	})
 
-	// Domain configuration
-	parentDomain := jsii.String("fuk.fi") // Replace with your Cloudflare-hosted domain
-	subdomain := jsii.String("yakv")      // Replace with your desired subdomain
+	// Read the config.json file
+	configBytes, err := os.ReadFile("config.json")
+	if err != nil {
+		panic("Failed to read config.json: " + err.Error())
+	}
 
-	// Read the config.json file to get the Cloudflare API token
-	configJsonBytes := []byte(`{"api_token": "iT23_YRf8Yv-Jo3je06E7iXOxrlbYsWYAd3jYfNw"}`)
+	// Parse the configuration
 	var config ConfigFile
-	if err := json.Unmarshal(configJsonBytes, &config); err != nil {
+	if err := json.Unmarshal(configBytes, &config); err != nil {
 		panic("Failed to parse config.json: " + err.Error())
 	}
+
+	// Domain configuration from config.json
+	parentDomain := jsii.String(config.ParentDomain)
+	subdomain := jsii.String(config.Subdomain)
 
 	// Create a secret in Secrets Manager for the Cloudflare API token
 	mainStack := awscdk.NewStack(app, jsii.String("CfCloudflareSecretsStack"), nil)
