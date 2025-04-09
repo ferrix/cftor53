@@ -147,7 +147,7 @@ func sendResponse(event CloudFormationEvent, status string, reason string, data 
 // HandleRequest is the main Lambda handler function
 func HandleRequest(ctx context.Context, event CloudFormationEvent) error {
 	// Log the request type
-	log.Printf("Received request type: %s", event.RequestType)
+	log.Println("Received request type:", event.RequestType)
 
 	// For Delete operation, simply return a success response
 	if event.RequestType == "Delete" {
@@ -202,7 +202,7 @@ func handleDNSCheck(ctx context.Context, event CloudFormationEvent) error {
 	if err != nil {
 		return sendResponse(event, "FAILED", fmt.Sprintf("Failed to get zone ID for %s: %v", props.Domain, err), nil)
 	}
-	log.Printf("Found zone ID: %s for domain %s", zoneID, props.Domain)
+	log.Println("Found zone ID:", zoneID, "for domain", props.Domain)
 
 	// Create a ResourceContainer for the zone
 	rc := cloudflare.ZoneIdentifier(zoneID)
@@ -276,7 +276,7 @@ func handleDNSUpdate(ctx context.Context, event CloudFormationEvent) error {
 	if err != nil {
 		return sendResponse(event, "FAILED", fmt.Sprintf("Failed to get zone ID for %s: %v", props.Domain, err), nil)
 	}
-	log.Printf("Found zone ID: %s for domain %s", zoneID, props.Domain)
+	log.Println("Found zone ID:", zoneID, "for domain", props.Domain)
 
 	// Create a ResourceContainer for the zone
 	rc := cloudflare.ZoneIdentifier(zoneID)
@@ -299,7 +299,7 @@ func handleDNSUpdate(ctx context.Context, event CloudFormationEvent) error {
 			existingNSRecords = append(existingNSRecords, record)
 		}
 	}
-	log.Printf("Found %d existing NS records for %s", len(existingNSRecords), fullDomainName)
+	log.Println("Found", len(existingNSRecords), "existing NS records for", fullDomainName)
 
 	// Extract existing nameservers (removing trailing dots)
 	var existingNameservers []string
@@ -346,18 +346,22 @@ func handleDNSUpdate(ctx context.Context, event CloudFormationEvent) error {
 
 	// Delete incorrect NS records
 	deletedCount := 0
+	deleteErrors := []string{}
 	for _, record := range nsRecordsToRemove {
 		err := api.DeleteDNSRecord(ctx, rc, record.ID)
 		if err != nil {
-			log.Printf("Error deleting NS record %s: %v", record.Content, err)
+			errMsg := fmt.Sprintf("Error deleting NS record %s: %v", record.Content, err)
+			log.Println(errMsg)
+			deleteErrors = append(deleteErrors, errMsg)
 			continue
 		}
-		log.Printf("Deleted NS record %s", record.Content)
+		log.Println("Deleted NS record", record.Content)
 		deletedCount++
 	}
 
 	// Add missing NS records
 	addedCount := 0
+	addErrors := []string{}
 	for _, ns := range nsToAdd {
 		createParams := cloudflare.CreateDNSRecordParams{
 			Type:    "NS",
@@ -368,10 +372,12 @@ func handleDNSUpdate(ctx context.Context, event CloudFormationEvent) error {
 
 		_, err := api.CreateDNSRecord(ctx, rc, createParams)
 		if err != nil {
-			log.Printf("Error creating NS record for %s: %v", ns, err)
+			errMsg := fmt.Sprintf("Error creating NS record for %s: %v", ns, err)
+			log.Println(errMsg)
+			addErrors = append(addErrors, errMsg)
 			continue
 		}
-		log.Printf("Created NS record for %s", ns)
+		log.Println("Created NS record for", ns)
 		addedCount++
 	}
 
@@ -383,6 +389,29 @@ func handleDNSUpdate(ctx context.Context, event CloudFormationEvent) error {
 		"NSRecordsDeleted":   deletedCount,
 		"NSRecordsAdded":     addedCount,
 		"Route53NameServers": route53NameServersClean,
+	}
+
+	// Add error information if there were any errors
+	if len(deleteErrors) > 0 || len(addErrors) > 0 {
+		data["Warnings"] = map[string]interface{}{
+			"DeleteErrors": deleteErrors,
+			"AddErrors":    addErrors,
+		}
+
+		// Log warnings prominently
+		log.Println("WARNING: There were", len(deleteErrors), "delete errors and", len(addErrors), "add errors during NS record update")
+	}
+
+	// If no records were successfully added when they needed to be, consider that a failure
+	if len(nsToAdd) > 0 && addedCount == 0 {
+		return sendResponse(event, "FAILED",
+			fmt.Sprintf("Failed to add any of the %d required NS records. See CloudWatch logs for details.", len(nsToAdd)),
+			data)
+	}
+
+	// If no records were successfully deleted when they needed to be, add a warning but don't fail
+	if len(nsRecordsToRemove) > 0 && deletedCount == 0 {
+		log.Println("WARNING: Failed to delete any of the outdated NS records")
 	}
 
 	return sendResponse(event, "SUCCESS", "NS records updated successfully", data)
