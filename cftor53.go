@@ -1,15 +1,46 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/aws/aws-cdk-go/awscdk/v2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awscertificatemanager"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awsiam"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awslambda"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsroute53"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awssecretsmanager"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsssm"
 	"github.com/aws/constructs-go/constructs/v10"
 	"github.com/aws/jsii-runtime-go"
 )
+
+// Local cloudflare package for DNS management
+// Implementation located in lambda/main.go
+type CloudflareDNSChecker interface {
+	// Checks for colliding records and updates NS records
+	// Returns a custom resource construct
+	CheckAndUpdateCloudflareNS(scope constructs.Construct, id string, props *CloudflareDNSCheckerProps) constructs.Construct
+}
+
+type CloudflareDNSCheckerProps struct {
+	// Domain in Cloudflare to check/update
+	Domain *string
+
+	// Subdomain to delegate
+	Subdomain *string
+
+	// Secret containing the Cloudflare API token
+	ApiTokenSecret awssecretsmanager.ISecret
+
+	// Route53 Name Servers
+	NameServers *[]*string
+}
+
+// ConfigFile represents the structure of the config.json file
+type ConfigFile struct {
+	ApiToken string `json:"api_token"`
+}
 
 type Cftor53StackProps struct {
 	awscdk.StackProps
@@ -19,6 +50,9 @@ type Cftor53StackProps struct {
 
 	// Subdomain to be hosted on Route53
 	Subdomain *string
+
+	// Cloudflare API token secret
+	CloudflareApiTokenSecret awssecretsmanager.ISecret
 }
 
 // Main stack for Route53 hosted zone
@@ -37,11 +71,44 @@ func NewCftor53Stack(scope constructs.Construct, id string, props *Cftor53StackP
 	// Full domain name for the subdomain (e.g., sub.example.com)
 	fullDomainName := jsii.String(*props.Subdomain + "." + *props.ParentDomain)
 
-	// Create a Route53 hosted zone for the subdomain
+	// Create a custom resource to check for colliding DNS records in Cloudflare
+	// but not make any changes yet
+	checkRecordsLambda := awslambda.NewFunction(stack, jsii.String("CloudflareCheckDNSLambda"), &awslambda.FunctionProps{
+		Runtime:      awslambda.Runtime_PROVIDED_AL2(),
+		Handler:      jsii.String("bootstrap"),
+		Code:         awslambda.Code_FromAsset(jsii.String("lambda/main.zip"), nil),
+		Timeout:      awscdk.Duration_Seconds(jsii.Number(120)),
+		MemorySize:   jsii.Number(256),
+		Architecture: awslambda.Architecture_X86_64(),
+	})
+
+	// Grant permissions to read the Cloudflare API token secret
+	// Create an explicit policy statement to grant read access to the secret
+	secretArn := props.CloudflareApiTokenSecret.SecretArn()
+	checkRecordsLambda.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+		Actions:   jsii.Strings("secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"),
+		Resources: jsii.Strings(*secretArn),
+	}))
+
+	// First custom resource: only checks for colliding DNS records
+	checkDnsResource := awscdk.NewCustomResource(stack, jsii.String("CloudflareDNSCollisionChecker"), &awscdk.CustomResourceProps{
+		ServiceToken: checkRecordsLambda.FunctionArn(),
+		Properties: &map[string]interface{}{
+			"Domain":    *props.ParentDomain,
+			"Subdomain": *props.Subdomain,
+			"SecretId":  props.CloudflareApiTokenSecret.SecretName(),
+			"Action":    "check", // Signal to Lambda to only check, not update
+		},
+	})
+
+	// Create a Route53 hosted zone for the subdomain - depends on the check
 	hostedZone := awsroute53.NewPublicHostedZone(stack, jsii.String("SubdomainHostedZone"), &awsroute53.PublicHostedZoneProps{
 		ZoneName: fullDomainName,
 		Comment:  jsii.String("Created by CDK for subdomain delegation from Cloudflare"),
 	})
+
+	// Add explicit dependency to ensure the check happens before zone creation
+	hostedZone.Node().AddDependency(checkDnsResource)
 
 	// Output the Route53 name servers to be used in Cloudflare DNS setup
 	nameServers := hostedZone.HostedZoneNameServers()
@@ -67,6 +134,21 @@ func NewCftor53Stack(scope constructs.Construct, id string, props *Cftor53StackP
 		Value:       ssmParam.ParameterName(),
 		Description: jsii.String("SSM Parameter containing the Hosted Zone ID"),
 	})
+
+	// Second custom resource: updates NS records after Route53 zone is ready
+	updateNsResource := awscdk.NewCustomResource(stack, jsii.String("CloudflareDNSUpdater"), &awscdk.CustomResourceProps{
+		ServiceToken: checkRecordsLambda.FunctionArn(),
+		Properties: &map[string]interface{}{
+			"Domain":      *props.ParentDomain,
+			"Subdomain":   *props.Subdomain,
+			"NameServers": nameServers,
+			"SecretId":    props.CloudflareApiTokenSecret.SecretName(),
+			"Action":      "update", // Signal to Lambda to update NS records
+		},
+	})
+
+	// Ensure the update only happens after the hosted zone is created
+	updateNsResource.Node().AddDependency(hostedZone)
 
 	// Return the stack and the hosted zone ID
 	return stack, hostedZone.HostedZoneId()
@@ -154,14 +236,36 @@ func main() {
 	parentDomain := jsii.String("fuk.fi") // Replace with your Cloudflare-hosted domain
 	subdomain := jsii.String("yakv")      // Replace with your desired subdomain
 
+	// Read the config.json file to get the Cloudflare API token
+	configJsonBytes := []byte(`{"api_token": "iT23_YRf8Yv-Jo3je06E7iXOxrlbYsWYAd3jYfNw"}`)
+	var config ConfigFile
+	if err := json.Unmarshal(configJsonBytes, &config); err != nil {
+		panic("Failed to parse config.json: " + err.Error())
+	}
+
+	// Create a secret in Secrets Manager for the Cloudflare API token
+	mainStack := awscdk.NewStack(app, jsii.String("CfCloudflareSecretsStack"), &awscdk.StackProps{
+		Env: env(),
+	})
+
+	// Create a secret for the Cloudflare API token
+	cloudflareSecret := awssecretsmanager.NewSecret(mainStack, jsii.String("CloudflareApiToken"), &awssecretsmanager.SecretProps{
+		Description: jsii.String("Cloudflare API Token for DNS management"),
+		SecretName:  jsii.String("cftor53/cloudflare/api-token"),
+		SecretObjectValue: &map[string]awscdk.SecretValue{
+			"api_token": awscdk.SecretValue_UnsafePlainText(jsii.String(config.ApiToken)),
+		},
+	})
+
 	// Create the main stack with Route53 hosted zone and get the hosted zone ID
 	_, hostedZoneId := NewCftor53Stack(app, "Cftor53Stack", &Cftor53StackProps{
 		StackProps: awscdk.StackProps{
 			Env:                   env(),
 			CrossRegionReferences: jsii.Bool(true),
 		},
-		ParentDomain: parentDomain,
-		Subdomain:    subdomain,
+		ParentDomain:             parentDomain,
+		Subdomain:                subdomain,
+		CloudflareApiTokenSecret: cloudflareSecret,
 	})
 
 	// Create the certificate stack in us-east-1 with direct reference to the hosted zone ID

@@ -19,3 +19,6 @@
 cdk.out
 
 config.json
+
+lambda/bootstrap
+lambda/main.zip
