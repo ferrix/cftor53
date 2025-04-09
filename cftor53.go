@@ -113,7 +113,7 @@ func NewCftor53Stack(scope constructs.Construct, id string, props *Cftor53StackP
 		Properties: &map[string]interface{}{
 			"Domain":    *props.ParentDomain,
 			"Subdomain": *props.Subdomain,
-			"SecretId":  props.CloudflareApiTokenSecret.SecretName(),
+			"SecretId":  cloudflareSecret.SecretName(),
 			"Action":    "check", // Signal to Lambda to only check, not update
 		},
 	})
@@ -159,7 +159,7 @@ func NewCftor53Stack(scope constructs.Construct, id string, props *Cftor53StackP
 			"Domain":      *props.ParentDomain,
 			"Subdomain":   *props.Subdomain,
 			"NameServers": nameServers,
-			"SecretId":    props.CloudflareApiTokenSecret.SecretName(),
+			"SecretId":    cloudflareSecret.SecretName(),
 			"Action":      "update", // Signal to Lambda to update NS records
 		},
 	})
