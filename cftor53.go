@@ -16,28 +16,6 @@ import (
 	"github.com/aws/jsii-runtime-go"
 )
 
-// Local cloudflare package for DNS management
-// Implementation located in lambda/main.go
-type CloudflareDNSChecker interface {
-	// Checks for colliding records and updates NS records
-	// Returns a custom resource construct
-	CheckAndUpdateCloudflareNS(scope constructs.Construct, id string, props *CloudflareDNSCheckerProps) constructs.Construct
-}
-
-type CloudflareDNSCheckerProps struct {
-	// Domain in Cloudflare to check/update
-	Domain *string
-
-	// Subdomain to delegate
-	Subdomain *string
-
-	// Secret containing the Cloudflare API token
-	ApiTokenSecret awssecretsmanager.ISecret
-
-	// Route53 Name Servers
-	NameServers *[]*string
-}
-
 // ConfigFile represents the structure of the config.json file
 type ConfigFile struct {
 	ApiToken       string                `json:"api_token"`
